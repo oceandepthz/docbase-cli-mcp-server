@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP server that wraps the DocBase CLI with access-token authentication."
 readme = "README.md"
 authors = [
-    { name = "小園 信人", email = "kozono@synapse.jp" }
+    { name = "makoto kozono", email = "oceandepthz@gmail.com" }
 ]
 requires-python = ">=3.11"
 dependencies = [

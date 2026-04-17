@@ -4,9 +4,10 @@ import argparse
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .commands import (
     build_get_current_user_profile_command,
@@ -39,6 +40,8 @@ runner = DocBaseCliRunner()
 TransportName = Literal["stdio", "streamable-http"]
 _DEFAULT_HTTP_HOST = "127.0.0.1"
 _DEFAULT_HTTP_PORT = 8000
+_LOCAL_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
+_LOCAL_ALLOWED_ORIGINS = ("http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*")
 
 
 @dataclass(frozen=True)
@@ -46,13 +49,16 @@ class RuntimeOptions:
     transport: TransportName
     host: str
     port: int
+    allowed_hosts: tuple[str, ...]
+    allowed_origins: tuple[str, ...]
+    disable_dns_rebinding_protection: bool
 
 
 def _get_default_transport(environ: Mapping[str, str]) -> TransportName:
     raw_transport = environ.get("DOCBASE_MCP_TRANSPORT", "stdio").strip().lower()
     if raw_transport not in {"stdio", "streamable-http"}:
         raise ValueError("DOCBASE_MCP_TRANSPORT must be either 'stdio' or 'streamable-http'.")
-    return raw_transport  # type: ignore[return-value]
+    return cast(TransportName, raw_transport)
 
 
 def _get_default_port(environ: Mapping[str, str]) -> int:
@@ -63,6 +69,62 @@ def _get_default_port(environ: Mapping[str, str]) -> int:
         return int(raw_port)
     except ValueError as error:
         raise ValueError("DOCBASE_MCP_PORT must be an integer.") from error
+
+
+def _split_csv_values(raw_values: Sequence[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    for raw_value in raw_values:
+        for value in raw_value.split(","):
+            normalized = value.strip()
+            if normalized and normalized not in values:
+                values.append(normalized)
+    return tuple(values)
+
+
+def _get_env_list(environ: Mapping[str, str], variable_name: str) -> tuple[str, ...]:
+    raw_value = environ.get(variable_name, "")
+    if not raw_value.strip():
+        return ()
+    return _split_csv_values((raw_value,))
+
+
+def _get_env_flag(environ: Mapping[str, str], variable_name: str) -> bool:
+    raw_value = environ.get(variable_name, "")
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _merge_list_values(
+    cli_values: Sequence[str] | None,
+    env_values: Sequence[str],
+) -> tuple[str, ...]:
+    merged = list(env_values)
+    if cli_values:
+        for value in _split_csv_values(cli_values):
+            if value not in merged:
+                merged.append(value)
+    return tuple(merged)
+
+
+def _build_transport_security(options: RuntimeOptions) -> TransportSecuritySettings:
+    if options.disable_dns_rebinding_protection:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    allowed_hosts = list(options.allowed_hosts)
+    allowed_origins = list(options.allowed_origins)
+
+    for allowed_host in _LOCAL_ALLOWED_HOSTS:
+        if allowed_host not in allowed_hosts:
+            allowed_hosts.append(allowed_host)
+
+    for allowed_origin in _LOCAL_ALLOWED_ORIGINS:
+        if allowed_origin not in allowed_origins:
+            allowed_origins.append(allowed_origin)
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
 
 
 def parse_runtime_options(
@@ -91,17 +153,56 @@ def parse_runtime_options(
         default=_get_default_port(effective_environ),
         help="Port to bind for streamable HTTP mode. Defaults to DOCBASE_MCP_PORT or 8000.",
     )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=None,
+        help=(
+            "Allowed Host header value(s) for streamable HTTP mode. "
+            "May be repeated or contain comma-separated entries. "
+            "Defaults to DOCBASE_MCP_ALLOWED_HOSTS."
+        ),
+    )
+    parser.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=None,
+        help=(
+            "Allowed Origin header value(s) for streamable HTTP mode. "
+            "May be repeated or contain comma-separated entries. "
+            "Defaults to DOCBASE_MCP_ALLOWED_ORIGINS."
+        ),
+    )
+    parser.add_argument(
+        "--disable-dns-rebinding-protection",
+        action="store_true",
+        default=_get_env_flag(effective_environ, "DOCBASE_MCP_DISABLE_DNS_REBINDING_PROTECTION"),
+        help=(
+            "Disable DNS rebinding protection for trusted environments. "
+            "Defaults to DOCBASE_MCP_DISABLE_DNS_REBINDING_PROTECTION."
+        ),
+    )
     parsed = parser.parse_args(list(argv) if argv is not None else None)
     return RuntimeOptions(
         transport=parsed.transport,
         host=parsed.host,
         port=parsed.port,
+        allowed_hosts=_merge_list_values(
+            parsed.allowed_host,
+            _get_env_list(effective_environ, "DOCBASE_MCP_ALLOWED_HOSTS"),
+        ),
+        allowed_origins=_merge_list_values(
+            parsed.allowed_origin,
+            _get_env_list(effective_environ, "DOCBASE_MCP_ALLOWED_ORIGINS"),
+        ),
+        disable_dns_rebinding_protection=parsed.disable_dns_rebinding_protection,
     )
 
 
 def configure_runtime(server: Any, options: RuntimeOptions) -> None:
     server.settings.host = options.host
     server.settings.port = options.port
+    server.settings.transport_security = _build_transport_security(options)
 
 
 def _read_only_annotations(title: str) -> dict[str, bool | str]:

@@ -7,7 +7,7 @@ It supports:
 - `stdio` for local command-style MCP launches
 - `streamable-http` for Docker or other HTTP-capable MCP clients
 
-The server uses **access-token authentication only**. The MCP client must provide these environment variables when launching the server:
+The server uses **access-token authentication only**. The process or container running this server must provide these environment variables:
 
 - `DOCBASE_TEAM_DOMAIN`
 - `DOCBASE_TOKEN`
@@ -142,6 +142,48 @@ docker run --rm -p 9000:9000 `
   -e DOCBASE_MCP_PORT=9000 `
   docbase-mcp
 ```
+
+### LibreChat on the same Docker network
+
+If LibreChat connects to this server through a Compose service name such as `docbase-mcp`, allow that Host header explicitly:
+
+```yaml
+services:
+  docbase-mcp:
+    image: docbase-mcp
+    pull_policy: never
+    environment:
+      DOCBASE_TEAM_DOMAIN: your-team
+      DOCBASE_TOKEN: ${DOCBASE_API_TOKEN}
+      DOCBASE_MCP_PORT: "8025"
+      DOCBASE_MCP_ALLOWED_HOSTS: "docbase-mcp:*"
+    networks:
+      - librechat_default
+```
+
+LibreChat MCP entry:
+
+```yaml
+docbase-mcp:
+  type: "streamable-http"
+  url: "http://docbase-mcp:8025/mcp"
+```
+
+Important:
+
+- Use `DOCBASE_TEAM_DOMAIN` and `DOCBASE_TOKEN` on the **server container**
+- Do **not** rely on LibreChat `env:` values to inject remote HTTP server credentials
+- `DOCBASE_DOMAIN` and `DOCBASE_API_TOKEN` are not the variable names this server reads
+- `DOCBASE_MCP_ALLOWED_HOSTS` accepts comma-separated values, and `:*` can be used as a wildcard port suffix
+
+If you truly need to bypass Host/Origin checks inside a trusted network, set:
+
+```yaml
+environment:
+  DOCBASE_MCP_DISABLE_DNS_REBINDING_PROTECTION: "true"
+```
+
+Use that only for trusted internal deployments.
 
 ## Error handling
 
